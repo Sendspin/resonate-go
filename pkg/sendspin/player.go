@@ -241,6 +241,14 @@ func (p *Player) buildReceiver(addr string) (*Receiver, error) {
 		OnStreamStart:  p.onStreamStart,
 		OnStreamEnd:    p.onStreamEnd,
 		OnError:        p.config.OnError,
+		OnCommand: func(cmd protocol.PlayerCommand) {
+			switch cmd.Command {
+			case "volume":
+				p.SetVolume(cmd.Volume)
+			case "mute":
+				p.Mute(cmd.Mute)
+			}
+		},
 	})
 }
 
@@ -494,7 +502,9 @@ func (p *Player) SetVolume(volume int) error {
 		volume = 100
 	}
 	p.stateMu.Lock()
-	p.state.Volume = volume
+	if !p.state.Muted {
+		p.state.Volume = volume
+	}
 	o := p.output
 	r := p.receiver
 	connected := p.state.Connected

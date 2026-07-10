@@ -49,6 +49,7 @@ type ReceiverConfig struct {
 	OnStreamStart  func(audio.Format)
 	OnStreamEnd    func()
 	OnError        func(error)
+	OnCommand      func(protocol.PlayerCommand)
 }
 
 type ReceiverStats struct {
@@ -200,6 +201,19 @@ func (r *Receiver) Connect() error {
 
 	if err := r.client.Connect(); err != nil {
 		return fmt.Errorf("connection failed: %w", err)
+	}
+
+	if r.config.OnCommand != nil {
+		go func() {
+			for {
+				select {
+				case cmd := <-r.client.ControlMsgs:
+					r.config.OnCommand(cmd)
+				case <-r.ctx.Done():
+					return
+				}
+			}
+		}()
 	}
 
 	log.Printf("Connected to server: %s", r.serverAddr)

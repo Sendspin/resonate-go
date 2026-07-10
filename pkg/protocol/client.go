@@ -496,6 +496,8 @@ func (c *Client) handleJSONMessage(data []byte) {
 			select {
 			case c.ControlMsgs <- *cmdMsg.Player:
 			case <-c.ctx.Done():
+			default:
+				log.Printf("ControlMsgs channel full, dropping command")
 			}
 		}
 

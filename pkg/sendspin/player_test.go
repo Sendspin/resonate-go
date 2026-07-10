@@ -46,6 +46,7 @@ func TestNewPlayer_Defaults(t *testing.T) {
 	player, err := NewPlayer(PlayerConfig{
 		ServerAddr: "localhost:8927",
 		PlayerName: "Test Player",
+		Volume:     80,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -289,5 +290,23 @@ func TestPlayer_EnsureCapsResolved_RunsOnce(t *testing.T) {
 	if player.config.MaxSampleRate != 99999 {
 		t.Errorf("second call should be no-op; got MaxSampleRate=%d",
 			player.config.MaxSampleRate)
+	}
+}
+
+func TestPlayer_MutePreservesVolume(t *testing.T) {
+	player, _ := NewPlayer(PlayerConfig{
+		ServerAddr: "localhost:8927",
+		PlayerName: "Test Player",
+		Volume:     40,
+	})
+
+	player.Mute(true)
+	if player.Status().Volume != 40 {
+		t.Errorf("expected volume 40 after mute, got %d", player.Status().Volume)
+	}
+
+	player.Mute(false)
+	if player.Status().Volume != 40 {
+		t.Errorf("expected volume 40 after unmute, got %d", player.Status().Volume)
 	}
 }
