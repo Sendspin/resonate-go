@@ -233,13 +233,15 @@ func (c *Client) pingLoop(period, writeDeadline time.Duration) {
 	for {
 		select {
 		case <-ticker.C:
-			c.mu.RLock()
+			c.mu.Lock()
 			conn := c.conn
-			c.mu.RUnlock()
 			if conn == nil {
+				c.mu.Unlock()
 				return
 			}
-			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeDeadline)); err != nil {
+			err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeDeadline))
+			c.mu.Unlock()
+			if err != nil {
 				// Write failure on a control frame means the connection
 				// is going down. Don't bother retrying — readMessages
 				// will hit the read deadline and tear down.
@@ -403,8 +405,8 @@ func (c *Client) buildSupportedRoles() []string {
 }
 
 func (c *Client) sendJSON(msg Message) error {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	if !c.connected {
 		return fmt.Errorf("not connected")

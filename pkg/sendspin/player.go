@@ -7,13 +7,14 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	stdsync "sync"
 	"time"
 
 	"github.com/Sendspin/sendspin-go/pkg/audio"
 	"github.com/Sendspin/sendspin-go/pkg/audio/decode"
 	"github.com/Sendspin/sendspin-go/pkg/audio/output"
 	"github.com/Sendspin/sendspin-go/pkg/protocol"
-	"github.com/Sendspin/sendspin-go/pkg/sync"
+	sendspinsync "github.com/Sendspin/sendspin-go/pkg/sync"
 )
 
 // ReconnectConfig controls automatic reconnect behavior after the protocol
@@ -146,7 +147,7 @@ type PlayerStats struct {
 	Dropped     int64
 	BufferDepth int // milliseconds
 	SyncRTT     int64
-	SyncQuality sync.Quality
+	SyncQuality sendspinsync.Quality
 }
 
 // Player provides high-level audio playback from Sendspin servers.
@@ -156,6 +157,7 @@ type Player struct {
 	receiver     *Receiver
 	output       output.Output
 	state        PlayerState
+	stateMu      stdsync.Mutex
 	ctx          context.Context
 	cancel       context.CancelFunc
 	capsResolved bool // probe runs once at first Connect; reconnects reuse the cached caps
@@ -205,8 +207,11 @@ func (p *Player) Connect() error {
 		return err
 	}
 
+	p.stateMu.Lock()
 	p.receiver = recv
 	p.state.Connected = true
+	p.stateMu.Unlock()
+
 	p.notifyStateChange()
 
 	go p.consumeAudio(recv)
@@ -300,8 +305,10 @@ func (p *Player) runReconnectLoop(initial *Receiver) {
 		default:
 		}
 
+		p.stateMu.Lock()
 		p.state.Connected = false
 		p.state.State = "reconnecting"
+		p.stateMu.Unlock()
 		p.notifyStateChange()
 
 		next, ok := p.reconnectWithBackoff()
@@ -310,8 +317,11 @@ func (p *Player) runReconnectLoop(initial *Receiver) {
 		}
 		current = next
 
+		p.stateMu.Lock()
 		p.receiver = current
 		p.state.Connected = true
+		p.stateMu.Unlock()
+
 		p.notifyStateChange()
 
 		go p.consumeAudio(current)
@@ -374,28 +384,41 @@ func jitter(d time.Duration, frac float64) time.Duration {
 }
 
 func (p *Player) onStreamStart(format audio.Format) {
+	p.stateMu.Lock()
 	if p.output == nil {
 		p.output = output.NewMalgo(p.config.AudioDevice)
 	}
+	o := p.output
+	p.stateMu.Unlock()
 
-	if err := p.output.Open(format.SampleRate, format.Channels, format.BitDepth); err != nil {
+	if o == nil {
+		return
+	}
+
+	if err := o.Open(format.SampleRate, format.Channels, format.BitDepth); err != nil {
 		p.notifyError(fmt.Errorf("failed to initialize output: %w", err))
 		return
 	}
 
-	p.output.SetVolume(p.state.Volume)
-	p.output.SetMuted(p.state.Muted)
-
+	p.stateMu.Lock()
+	vol := p.state.Volume
+	mut := p.state.Muted
 	p.state.Codec = format.Codec
 	p.state.SampleRate = format.SampleRate
 	p.state.Channels = format.Channels
 	p.state.BitDepth = format.BitDepth
 	p.state.State = "playing"
+	p.stateMu.Unlock()
+
+	o.SetVolume(vol)
+	o.SetMuted(mut)
 	p.notifyStateChange()
 }
 
 func (p *Player) onStreamEnd() {
+	p.stateMu.Lock()
 	p.state.State = "idle"
+	p.stateMu.Unlock()
 	p.notifyStateChange()
 }
 
@@ -424,28 +447,40 @@ func (p *Player) consumeAudio(recv *Receiver) {
 }
 
 func (p *Player) Play() error {
-	if !p.state.Connected {
+	p.stateMu.Lock()
+	connected := p.state.Connected
+	p.stateMu.Unlock()
+
+	if !connected {
 		return fmt.Errorf("not connected")
 	}
+	p.stateMu.Lock()
 	p.state.State = "playing"
+	p.stateMu.Unlock()
 	p.notifyStateChange()
 	return p.sendState()
 }
 
 func (p *Player) Pause() error {
+	p.stateMu.Lock()
 	if !p.state.Connected {
+		p.stateMu.Unlock()
 		return fmt.Errorf("not connected")
 	}
 	p.state.State = "paused"
+	p.stateMu.Unlock()
 	p.notifyStateChange()
 	return p.sendState()
 }
 
 func (p *Player) Stop() error {
+	p.stateMu.Lock()
 	if !p.state.Connected {
+		p.stateMu.Unlock()
 		return fmt.Errorf("not connected")
 	}
 	p.state.State = "idle"
+	p.stateMu.Unlock()
 	p.notifyStateChange()
 	return p.sendState()
 }
@@ -458,13 +493,18 @@ func (p *Player) SetVolume(volume int) error {
 	if volume > 100 {
 		volume = 100
 	}
+	p.stateMu.Lock()
 	p.state.Volume = volume
+	o := p.output
+	r := p.receiver
+	connected := p.state.Connected
+	p.stateMu.Unlock()
 
-	if p.output != nil {
-		p.output.SetVolume(volume)
+	if o != nil {
+		o.SetVolume(volume)
 	}
 
-	if p.receiver != nil && p.state.Connected {
+	if r != nil && connected {
 		p.sendState()
 	}
 
@@ -473,13 +513,18 @@ func (p *Player) SetVolume(volume int) error {
 }
 
 func (p *Player) Mute(muted bool) error {
+	p.stateMu.Lock()
 	p.state.Muted = muted
+	o := p.output
+	r := p.receiver
+	connected := p.state.Connected
+	p.stateMu.Unlock()
 
-	if p.output != nil {
-		p.output.SetMuted(muted)
+	if o != nil {
+		o.SetMuted(muted)
 	}
 
-	if p.receiver != nil && p.state.Connected {
+	if r != nil && connected {
 		p.sendState()
 	}
 
@@ -488,14 +533,20 @@ func (p *Player) Mute(muted bool) error {
 }
 
 func (p *Player) Status() PlayerState {
+	p.stateMu.Lock()
+	defer p.stateMu.Unlock()
 	return p.state
 }
 
 func (p *Player) Stats() PlayerStats {
 	stats := PlayerStats{}
 
-	if p.receiver != nil {
-		rs := p.receiver.Stats()
+	p.stateMu.Lock()
+	r := p.receiver
+	p.stateMu.Unlock()
+
+	if r != nil {
+		rs := r.Stats()
 		stats.Received = rs.Received
 		stats.Played = rs.Played
 		stats.Dropped = rs.Dropped
@@ -510,16 +561,23 @@ func (p *Player) Stats() PlayerStats {
 func (p *Player) Close() error {
 	p.cancel()
 
-	if p.receiver != nil {
-		p.receiver.Close()
+	p.stateMu.Lock()
+	r := p.receiver
+	o := p.output
+	p.stateMu.Unlock()
+
+	if r != nil {
+		r.Close()
 	}
 
-	if p.output != nil {
-		p.output.Close()
+	if o != nil {
+		o.Close()
 	}
 
+	p.stateMu.Lock()
 	p.state.Connected = false
 	p.state.State = "idle"
+	p.stateMu.Unlock()
 	p.notifyStateChange()
 
 	return nil
@@ -529,7 +587,11 @@ func (p *Player) Close() error {
 // "pause", "next", "previous"). This is how a player requests playback
 // control — the server decides whether to act on it.
 func (p *Player) SendCommand(command string) error {
-	if p.receiver == nil || p.receiver.client == nil {
+	p.stateMu.Lock()
+	r := p.receiver
+	p.stateMu.Unlock()
+
+	if r == nil || r.client == nil {
 		return fmt.Errorf("not connected")
 	}
 	payload := map[string]interface{}{
@@ -537,7 +599,8 @@ func (p *Player) SendCommand(command string) error {
 			"command": command,
 		},
 	}
-	return p.receiver.client.Send("client/command", payload)
+	return r.client.Send("client/command", payload)
+
 }
 
 // FormatRequest describes a stream/request-format ask. Any zero-valued field is
@@ -554,15 +617,20 @@ type FormatRequest struct {
 // pressure. The server responds by starting a new stream in the chosen format.
 // Returns an error if not connected.
 func (p *Player) RequestFormat(req FormatRequest) error {
-	if p.receiver == nil || p.receiver.client == nil {
+	p.stateMu.Lock()
+	r := p.receiver
+	p.stateMu.Unlock()
+
+	if r == nil || r.client == nil {
 		return fmt.Errorf("not connected")
 	}
-	return p.receiver.client.SendRequestFormat(protocol.RequestFormatPlayer{
+	return r.client.SendRequestFormat(protocol.RequestFormatPlayer{
 		Codec:      req.Codec,
 		Channels:   req.Channels,
 		SampleRate: req.SampleRate,
 		BitDepth:   req.BitDepth,
 	})
+
 }
 
 // EnterExternalSource announces that this player is now driven by an external
@@ -572,46 +640,68 @@ func (p *Player) RequestFormat(req FormatRequest) error {
 // whatever local audio the external source produces. Call ExitExternalSource to
 // rejoin normal playback.
 func (p *Player) EnterExternalSource() error {
-	if p.receiver == nil || p.receiver.client == nil {
+	p.stateMu.Lock()
+	r := p.receiver
+	p.stateMu.Unlock()
+
+	if r == nil || r.client == nil {
 		return fmt.Errorf("not connected")
 	}
-	if err := p.receiver.client.SendState(protocol.PlayerState{State: "external_source"}); err != nil {
+	if err := r.client.SendState(protocol.PlayerState{State: "external_source"}); err != nil {
 		return err
 	}
+	p.stateMu.Lock()
 	p.state.State = "external_source"
+	p.stateMu.Unlock()
 	p.notifyStateChange()
 	return nil
+
 }
 
 // ExitExternalSource leaves external-source mode and rejoins normal Sendspin
 // playback by re-sending the synchronized client/state. A conformant server
 // returns the client to its previous group and resumes streaming.
 func (p *Player) ExitExternalSource() error {
-	if p.receiver == nil || p.receiver.client == nil {
+	p.stateMu.Lock()
+	r := p.receiver
+	p.stateMu.Unlock()
+
+	if r == nil || r.client == nil {
 		return fmt.Errorf("not connected")
 	}
 	if err := p.sendState(); err != nil {
 		return err
 	}
+	p.stateMu.Lock()
 	p.state.State = "idle"
+	p.stateMu.Unlock()
 	p.notifyStateChange()
 	return nil
+
 }
 
 func (p *Player) sendState() error {
-	if p.receiver == nil || p.receiver.client == nil {
+	p.stateMu.Lock()
+	r := p.receiver
+	s := p.state
+	p.stateMu.Unlock()
+
+	if r == nil || r.client == nil {
 		return nil
 	}
-	return p.receiver.client.SendState(protocol.PlayerState{
+	return r.client.SendState(protocol.PlayerState{
 		State:  "synchronized",
-		Volume: p.state.Volume,
-		Muted:  p.state.Muted,
+		Volume: s.Volume,
+		Muted:  s.Muted,
 	})
 }
 
 func (p *Player) notifyStateChange() {
+	p.stateMu.Lock()
+	s := p.state
+	p.stateMu.Unlock()
 	if p.config.OnStateChange != nil {
-		p.config.OnStateChange(p.state)
+		p.config.OnStateChange(s)
 	}
 }
 
