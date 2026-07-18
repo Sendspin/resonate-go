@@ -11,6 +11,7 @@ require (
 	github.com/hajimehoshi/go-mp3 v0.3.4
 	github.com/hashicorp/mdns v1.0.6
 	github.com/mewkiz/flac v1.0.13
+	golang.org/x/crypto v0.36.0
 	gopkg.in/hraban/opus.v2 v2.0.0-20230925203106-0188a62cb302
 	gopkg.in/yaml.v3 v3.0.1
 )
