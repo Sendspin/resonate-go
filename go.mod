@@ -5,6 +5,7 @@ go 1.24.1
 require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/flynn/noise v1.1.0
 	github.com/gen2brain/malgo v0.11.24
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
