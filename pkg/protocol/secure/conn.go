@@ -269,6 +269,9 @@ func newConn(ws *websocket.Conn, sess *Session, peerID string, maxMessageSize in
 // connection, the server_id on a client-side one.
 func (c *Conn) PeerID() string { return c.peerID }
 
+// Suite returns the negotiated cipher suite, needed for PSK wrapping.
+func (c *Conn) Suite() Suite { return c.suite }
+
 // HandshakeHash returns the Noise handshake hash h of this connection.
 func (c *Conn) HandshakeHash() []byte { return c.sess.HandshakeHash() }
 
