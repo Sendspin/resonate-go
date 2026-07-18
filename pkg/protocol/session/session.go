@@ -19,8 +19,13 @@ type ServerConfig struct {
 	// InitialActivities is the first server/activate's activity set.
 	InitialActivities []Activity
 	// ChooseActiveRoles maps the client's hello to the roles to activate.
-	// Nil activates the first version of each offered role family.
+	// Nil activates the first version of each offered role family. Ignored
+	// when 'pairing' is among the activities: pairing activates always carry
+	// empty active_roles, per spec.
 	ChooseActiveRoles func(hello ClientHello) []string
+	// SelectedPairMethod names the pairing method for a pairing activation.
+	// Required exactly when 'pairing' is in InitialActivities.
+	SelectedPairMethod string
 }
 
 // ServerSession is an established server-side session.
@@ -54,12 +59,25 @@ func EstablishServer(conn *secure.Conn, cfg ServerConfig) (*ServerSession, error
 		return nil, err
 	}
 
+	pairing := false
+	for _, a := range cfg.InitialActivities {
+		if a == ActivityPairing {
+			pairing = true
+		}
+	}
+	if pairing == (cfg.SelectedPairMethod == "") {
+		return nil, fmt.Errorf("server bug: selected_pair_method required exactly when pairing is declared")
+	}
+	if cfg.SelectedPairMethod != "" && (cfg.SelectedPairMethod == PairMethodPairingPSK) != (cfg.PSKCategory == PSKPairing) {
+		return nil, fmt.Errorf("server bug: pairing_psk method must be selected iff the matched PSK is a Pairing PSK")
+	}
+
 	choose := cfg.ChooseActiveRoles
 	if choose == nil {
 		choose = FirstVersionPerFamily
 	}
 	roles := choose(*hello)
-	if roles == nil {
+	if roles == nil || pairing {
 		roles = []string{}
 	}
 
@@ -72,8 +90,9 @@ func EstablishServer(conn *secure.Conn, cfg ServerConfig) (*ServerSession, error
 	}
 
 	if err := writeMessage(conn, ServerActivate{
-		Activities:  cfg.InitialActivities,
-		ActiveRoles: &roles,
+		Activities:         cfg.InitialActivities,
+		ActiveRoles:        &roles,
+		SelectedPairMethod: cfg.SelectedPairMethod,
 	}); err != nil {
 		return nil, fmt.Errorf("send server/activate: %w", err)
 	}

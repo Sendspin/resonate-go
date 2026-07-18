@@ -29,6 +29,12 @@ type Conn struct {
 	reasm   *Reassembler
 	writeMu sync.Mutex
 	peerID  string
+
+	// Retained for in-band re-handshakes: client_id/server_id and suite
+	// carry over, and the new prologue is the prior handshake's hash.
+	identity *Identity
+	peerPub  []byte
+	suite    Suite
 }
 
 // ServerHandshakeConfig configures the server side of the preamble. The
@@ -130,7 +136,9 @@ func ServerHandshake(ws *websocket.Conn, cfg ServerHandshakeConfig) (conn *Conn,
 		return nil, ClientInit{}, err
 	}
 
-	return newConn(ws, sess, ci.ClientID, cfg.MaxMessageSize), ci, nil
+	c := newConn(ws, sess, ci.ClientID, cfg.MaxMessageSize)
+	c.identity, c.peerPub, c.suite = cfg.Identity, clientPub, ci.Suite
+	return c, ci, nil
 }
 
 // ClientHandshakeConfig configures the client side of the preamble.
@@ -240,7 +248,9 @@ func ClientHandshake(ws *websocket.Conn, cfg ClientHandshakeConfig) (conn *Conn,
 		return nil, ServerInit{}, fmt.Errorf("write noise message 2: %w", err)
 	}
 
-	return newConn(ws, sess, si.ServerID, cfg.MaxMessageSize), si, nil
+	c := newConn(ws, sess, si.ServerID, cfg.MaxMessageSize)
+	c.identity, c.peerPub, c.suite = cfg.Identity, serverPub, suite
+	return c, si, nil
 }
 
 func newConn(ws *websocket.Conn, sess *Session, peerID string, maxMessageSize int) *Conn {
