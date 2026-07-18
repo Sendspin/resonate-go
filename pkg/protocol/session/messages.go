@@ -207,6 +207,24 @@ func typeOf(v any) (string, error) {
 		return "server/time", nil
 	case ClientGoodbye, *ClientGoodbye:
 		return "client/goodbye", nil
+	case ClientPairInit, *ClientPairInit:
+		return "client/pair-init", nil
+	case ServerPairInit, *ServerPairInit:
+		return "server/pair-init", nil
+	case ServerPairAuth, *ServerPairAuth:
+		return "server/pair-auth", nil
+	case ClientPairAuth, *ClientPairAuth:
+		return "client/pair-auth", nil
+	case ServerPairConfirm, *ServerPairConfirm:
+		return "server/pair-confirm", nil
+	case ClientPairConfirm, *ClientPairConfirm:
+		return "client/pair-confirm", nil
+	case ClientPairFinalize, *ClientPairFinalize:
+		return "client/pair-finalize", nil
+	case ServerPairFinalize, *ServerPairFinalize:
+		return "server/pair-finalize", nil
+	case PairAbort, *PairAbort:
+		return "pair/abort", nil
 	default:
 		return "", fmt.Errorf("unknown message type %T", v)
 	}
@@ -246,6 +264,24 @@ func Parse(raw []byte) (any, error) {
 		v = &ServerTime{}
 	case "client/goodbye":
 		v = &ClientGoodbye{}
+	case "client/pair-init":
+		v = &ClientPairInit{}
+	case "server/pair-init":
+		v = &ServerPairInit{}
+	case "server/pair-auth":
+		v = &ServerPairAuth{}
+	case "client/pair-auth":
+		v = &ClientPairAuth{}
+	case "server/pair-confirm":
+		v = &ServerPairConfirm{}
+	case "client/pair-confirm":
+		v = &ClientPairConfirm{}
+	case "client/pair-finalize":
+		v = &ClientPairFinalize{}
+	case "server/pair-finalize":
+		v = &ServerPairFinalize{}
+	case "pair/abort":
+		v = &PairAbort{}
 	default:
 		return UnknownMessage{Type: env.Type, Payload: env.Payload}, nil
 	}

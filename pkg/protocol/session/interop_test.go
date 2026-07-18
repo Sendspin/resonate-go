@@ -18,12 +18,10 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Drives the dotnet unpaired scenario end to end through EstablishServer:
-// Noise preamble → server/hello → client/hello → server/activate, then waits
-// for the host's "connected" and "success" verdicts.
-//
-//	SENDSPIN_INTEROP_DOTNET=/path/to/sendspin-dotnet go test -tags interop -run TestInterop -v ./pkg/protocol/session/
-func TestInterop_SessionAgainstDotnetHost(t *testing.T) {
+// startDotnetHost spawns the sendspin-dotnet InteropClient for a scenario
+// and returns an event channel plus a wait helper.
+func startDotnetHost(t *testing.T, scenario, port string, extraArgs ...string) (chan map[string]any, func(name string, timeout time.Duration) map[string]any) {
+	t.Helper()
 	dotnetDir := os.Getenv("SENDSPIN_INTEROP_DOTNET")
 	if dotnetDir == "" {
 		dotnetDir = "/workspace/sendspin-dotnet"
@@ -35,9 +33,8 @@ func TestInterop_SessionAgainstDotnetHost(t *testing.T) {
 		t.Skip("dotnet SDK not on PATH")
 	}
 
-	cmd := exec.Command("dotnet", "run",
-		"--project", dotnetDir+"/tools/interop/InteropClient",
-		"-c", "Release", "--", "unpaired", "8935")
+	args := append([]string{"run", "--project", dotnetDir + "/tools/interop/InteropClient", "-c", "Release", "--", scenario, port}, extraArgs...)
+	cmd := exec.Command("dotnet", args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -46,10 +43,10 @@ func TestInterop_SessionAgainstDotnetHost(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
+	t.Cleanup(func() {
 		cmd.Process.Kill()
 		cmd.Wait()
-	}()
+	})
 
 	events := make(chan map[string]any, 32)
 	go func() {
@@ -83,7 +80,16 @@ func TestInterop_SessionAgainstDotnetHost(t *testing.T) {
 			}
 		}
 	}
+	return events, waitEvent
+}
 
+// Drives the dotnet unpaired scenario end to end through EstablishServer:
+// Noise preamble → server/hello → client/hello → server/activate, then waits
+// for the host's "connected" and "success" verdicts.
+//
+//	SENDSPIN_INTEROP_DOTNET=/path/to/sendspin-dotnet go test -tags interop -run TestInterop -v ./pkg/protocol/session/
+func TestInterop_SessionAgainstDotnetHost(t *testing.T) {
+	_, waitEvent := startDotnetHost(t, "unpaired", "8935")
 	ready := waitEvent("host_ready", 90*time.Second)
 	port := int(ready["port"].(float64))
 
@@ -131,4 +137,82 @@ func TestInterop_SessionAgainstDotnetHost(t *testing.T) {
 	waitEvent("connected", 30*time.Second)
 	waitEvent("success", 10*time.Second)
 	t.Log("INTEROP PASS: go session layer ↔ dotnet client (unpaired)")
+}
+
+// Drives the dotnet pairing scenario: handshake on a shared Pairing PSK,
+// pairing activate, client/pair-finalize → persist → server/pair-finalize,
+// re-handshake to the delivered long-term PSK, and re-establishment at
+// 'user' trust. The host verifies a LongTerm record bound to our server_id.
+func TestInterop_PairingPSKAgainstDotnetHost(t *testing.T) {
+	pairingPSK, err := secure.NewPSK()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, waitEvent := startDotnetHost(t, "pairing", "8936", fmt.Sprintf("%x", pairingPSK[:]))
+
+	ready := waitEvent("host_ready", 90*time.Second)
+	port := int(ready["port"].(float64))
+
+	serverIdentity, err := secure.GenerateIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, _, err := websocket.DefaultDialer.Dial(fmt.Sprintf("ws://127.0.0.1:%d/sendspin", port), nil)
+	if err != nil {
+		t.Fatalf("dial dotnet host: %v", err)
+	}
+	conn, ci, err := secure.ServerHandshake(ws, secure.ServerHandshakeConfig{
+		Identity:  serverIdentity,
+		SelectPSK: func(string) (secure.PSK, error) { return pairingPSK, nil },
+	})
+	if err != nil {
+		t.Fatalf("server handshake on pairing psk: %v", err)
+	}
+	defer conn.Close()
+	t.Logf("noise handshake on pairing psk: suite=%s client=%s", ci.Suite, ci.ClientID)
+
+	sess, err := EstablishServer(conn, ServerConfig{
+		ServerName:         "go-pairing-server",
+		PSKCategory:        PSKPairing,
+		InitialActivities:  []Activity{ActivityPairing},
+		SelectedPairMethod: PairMethodPairingPSK,
+	})
+	if err != nil {
+		t.Fatalf("EstablishServer (pairing): %v", err)
+	}
+
+	store := NewMemoryPairingStore()
+	after, err := sess.CompletePairingPSK(store.PutRecord, ServerConfig{
+		ServerName:        "go-pairing-server",
+		InitialActivities: []Activity{ActivityPlayback},
+	})
+	if err != nil {
+		t.Fatalf("CompletePairingPSK: %v", err)
+	}
+	records := store.Records()
+	if len(records) != 1 || records[0].PeerID != ci.ClientID {
+		t.Fatalf("server records after pairing = %+v", records)
+	}
+	t.Logf("post-pairing session: trust=%s roles=%v", after.Hello.TrustLevel, after.ActiveRoles)
+	if after.Hello.TrustLevel != TrustUser {
+		t.Errorf("post-pairing trust = %q, want user", after.Hello.TrustLevel)
+	}
+
+	go func() {
+		for {
+			if _, _, err := after.Conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	ev := waitEvent("pairing_completed", 30*time.Second)
+	if persisted, _ := ev["long_term_record_persisted"].(bool); !persisted {
+		t.Error("dotnet host did not persist a long-term record")
+	}
+	if sid, _ := ev["server_id"].(string); sid != serverIdentity.ID() {
+		t.Errorf("host paired with server_id %q, want %q", sid, serverIdentity.ID())
+	}
+	waitEvent("success", 10*time.Second)
+	t.Log("INTEROP PASS: go server ↔ dotnet client (pairing_psk)")
 }

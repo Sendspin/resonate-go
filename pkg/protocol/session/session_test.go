@@ -96,38 +96,50 @@ func TestParse_RegistryAndUnknown(t *testing.T) {
 	}
 }
 
-// loopback establishes a full encrypted connection pair over a real
-// WebSocket and returns both Conns.
-func loopback(t *testing.T) (serverConn, clientConn *secure.Conn) {
+// startSecureLoopback runs an httptest WebSocket endpoint performing the
+// server-side handshake with the given PSK selector, delivering Conns on ch.
+func startSecureLoopback(t *testing.T, serverID *secure.Identity, selectPSK func(string) (secure.PSK, error), ch chan<- *secure.Conn) *httptest.Server {
 	t.Helper()
-	serverID, _ := secure.GenerateIdentity()
-	clientID, _ := secure.GenerateIdentity()
-
 	upgrader := websocket.Upgrader{}
-	serverConnCh := make(chan *secure.Conn, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ws, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
-		conn, _, err := secure.ServerHandshake(ws, secure.ServerHandshakeConfig{Identity: serverID})
+		conn, _, err := secure.ServerHandshake(ws, secure.ServerHandshakeConfig{Identity: serverID, SelectPSK: selectPSK})
 		if err != nil {
 			t.Errorf("server handshake: %v", err)
 			return
 		}
-		serverConnCh <- conn
+		ch <- conn
 	}))
 	t.Cleanup(srv.Close)
+	return srv
+}
 
+// dialSecure dials the loopback server and completes the client handshake.
+func dialSecure(t *testing.T, srv *httptest.Server, clientID *secure.Identity, selectPSK func(string) (secure.PSK, bool)) *secure.Conn {
+	t.Helper()
 	ws, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	clientConn, _, err = secure.ClientHandshake(ws, secure.ClientHandshakeConfig{Identity: clientID})
+	conn, _, err := secure.ClientHandshake(ws, secure.ClientHandshakeConfig{Identity: clientID, SelectPSK: selectPSK})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return <-serverConnCh, clientConn
+	return conn
+}
+
+// loopback establishes a Sentinel-keyed encrypted connection pair.
+func loopback(t *testing.T) (serverConn, clientConn *secure.Conn) {
+	t.Helper()
+	serverID, _ := secure.GenerateIdentity()
+	clientID, _ := secure.GenerateIdentity()
+	ch := make(chan *secure.Conn, 1)
+	srv := startSecureLoopback(t, serverID, nil, ch)
+	clientConn = dialSecure(t, srv, clientID, nil)
+	return <-ch, clientConn
 }
 
 func testHello(unpaired bool) ClientHello {
