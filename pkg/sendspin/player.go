@@ -502,7 +502,8 @@ func (p *Player) SetVolume(volume int) error {
 		volume = 100
 	}
 	p.stateMu.Lock()
-	if !p.state.Muted {
+	muted := p.state.Muted
+	if !muted {
 		p.state.Volume = volume
 	}
 	o := p.output
@@ -510,7 +511,10 @@ func (p *Player) SetVolume(volume int) error {
 	connected := p.state.Connected
 	p.stateMu.Unlock()
 
-	if o != nil {
+	// While muted the volume change is ignored for state and output alike;
+	// applying it to only one of them would leave the output gain diverging
+	// from the volume the server displays (silent audio after unmute).
+	if o != nil && !muted {
 		o.SetVolume(volume)
 	}
 
@@ -525,6 +529,7 @@ func (p *Player) SetVolume(volume int) error {
 func (p *Player) Mute(muted bool) error {
 	p.stateMu.Lock()
 	p.state.Muted = muted
+	vol := p.state.Volume
 	o := p.output
 	r := p.receiver
 	connected := p.state.Connected
@@ -532,6 +537,12 @@ func (p *Player) Mute(muted bool) error {
 
 	if o != nil {
 		o.SetMuted(muted)
+		if !muted {
+			// Resync the output gain with the stored volume on unmute:
+			// SetVolume drops volume changes that arrive while muted, so
+			// the output may hold a stale value.
+			o.SetVolume(vol)
+		}
 	}
 
 	if r != nil && connected {

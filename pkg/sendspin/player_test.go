@@ -310,3 +310,48 @@ func TestPlayer_MutePreservesVolume(t *testing.T) {
 		t.Errorf("expected volume 40 after unmute, got %d", player.Status().Volume)
 	}
 }
+
+// fakeVolumeOutput records the volume/mute values applied to the output so
+// tests can detect divergence between Player state and output gain.
+type fakeVolumeOutput struct {
+	volume int
+	muted  bool
+}
+
+func (f *fakeVolumeOutput) Open(sampleRate, channels, bitDepth int) error { return nil }
+func (f *fakeVolumeOutput) Write(samples []int32) error                   { return nil }
+func (f *fakeVolumeOutput) SetVolume(v int)                               { f.volume = v }
+func (f *fakeVolumeOutput) SetMuted(m bool)                               { f.muted = m }
+func (f *fakeVolumeOutput) Close() error                                  { return nil }
+
+// A volume command arriving while muted (Music Assistant sends volume 0
+// alongside mute) must not desync the output gain from the stored volume:
+// the output multiplier is (volume/100)^1.5 independent of mute, so a stale
+// output volume of 0 would leave the player silent after unmute while the
+// server still displays the old level.
+func TestPlayer_SetVolumeWhileMuted_OutputStaysInSync(t *testing.T) {
+	out := &fakeVolumeOutput{volume: 40}
+	player, err := NewPlayer(PlayerConfig{
+		ServerAddr: "localhost:8927",
+		PlayerName: "Test Player",
+		Volume:     40,
+		Output:     out,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	player.Mute(true)
+	player.SetVolume(0)
+	player.Mute(false)
+
+	if got := player.Status().Volume; got != 40 {
+		t.Errorf("stored volume = %d, want 40", got)
+	}
+	if out.volume != 40 {
+		t.Errorf("output volume = %d, want 40 (player would be silent after unmute)", out.volume)
+	}
+	if out.muted {
+		t.Error("output still muted after unmute")
+	}
+}
