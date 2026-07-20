@@ -272,6 +272,14 @@ func (m *GroupManager) GroupOf(clientID string) *playback.Group {
 	return nil
 }
 
+// GroupByID returns the playback group with the given id for the audio loop to
+// broadcast into, or nil if there is no such group.
+func (m *GroupManager) GroupByID(groupID string) *playback.Group {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.groups[groupID]
+}
+
 // GroupID returns the client's current group_id, or "" if unknown.
 func (m *GroupManager) GroupID(clientID string) string {
 	m.mu.Lock()
