@@ -183,6 +183,23 @@ living in `pkg/protocol`.
    S6 and its activation stays declined until there is something to test
    against; this also derisks the engine-input work.
 
+## Server-repo cutover (decided 2026-07-18, Chris)
+
+The `sendspin-go-server` binary cuts **straight over** to the spec-v2
+encrypted transport when the integration lands — no side-by-side / dual-mode
+build in the server repo. The legacy server is replaced in place; users who
+need a legacy peer stay on the current `v0.1.x` release line.
+
+- The server repo's README carries a forward-looking **Compatibility** note
+  stating the upcoming version will not interoperate with legacy
+  pre-encryption implementations (added ahead of the cutover so it's already
+  in the docs when the release ships).
+- The current `v0.1.x` release stays accurate: it *is* the legacy-compatible
+  server, so the note is framed as "the upcoming version," not a claim about
+  what ships today. It converts to present-tense at the cutover release.
+- Same principle applies to the SDK's own `pkg/sendspin` server API when it
+  is rebuilt on the new transport (hard cutover, in place — see 2.10).
+
 ## Remaining open questions
 
 1. Where does the server persist identity + pairing records?
