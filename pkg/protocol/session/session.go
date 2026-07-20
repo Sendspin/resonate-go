@@ -26,6 +26,11 @@ type ServerConfig struct {
 	// SelectedPairMethod names the pairing method for a pairing activation.
 	// Required exactly when 'pairing' is in InitialActivities.
 	SelectedPairMethod string
+	// ChooseActivities, when non-nil, picks the activity set from the
+	// client's hello (e.g. to grant playback only when the client actually
+	// advertised unpaired access). It overrides InitialActivities. Pairing
+	// activations do not use this hook.
+	ChooseActivities func(hello ClientHello) []Activity
 }
 
 // ServerSession is an established server-side session.
@@ -33,7 +38,9 @@ type ServerSession struct {
 	Conn        *secure.Conn
 	Hello       ClientHello
 	ActiveRoles []string
-	cfg         ServerConfig
+	// Activities is the activity set declared in the initial server/activate.
+	Activities []Activity
+	cfg        ServerConfig
 }
 
 // EstablishServer runs the server side of session establishment on an
@@ -72,6 +79,11 @@ func EstablishServer(conn *secure.Conn, cfg ServerConfig) (*ServerSession, error
 		return nil, fmt.Errorf("server bug: pairing_psk method must be selected iff the matched PSK is a Pairing PSK")
 	}
 
+	activities := cfg.InitialActivities
+	if cfg.ChooseActivities != nil && !pairing {
+		activities = cfg.ChooseActivities(*hello)
+	}
+
 	choose := cfg.ChooseActiveRoles
 	if choose == nil {
 		choose = FirstVersionPerFamily
@@ -82,22 +94,28 @@ func EstablishServer(conn *secure.Conn, cfg ServerConfig) (*ServerSession, error
 	}
 
 	unpaired := hello.UnpairedAccess.Enabled
-	if !AllowedActivities(cfg.PSKCategory, cfg.InitialActivities, unpaired) {
-		return nil, fmt.Errorf("server bug: activities %v not admissible on %s psk", cfg.InitialActivities, cfg.PSKCategory)
+	if !AllowedActivities(cfg.PSKCategory, activities, unpaired) {
+		return nil, fmt.Errorf("server bug: activities %v not admissible on %s psk", activities, cfg.PSKCategory)
 	}
-	if len(roles) > 0 && !PlaybackCapable(cfg.PSKCategory, cfg.InitialActivities, unpaired) {
-		return nil, fmt.Errorf("server bug: non-empty active_roles on a non-playback-capable connection")
+	// A non-playback-capable connection (e.g. a Sentinel client without
+	// unpaired access, or one the server declined playback for) carries no
+	// active roles — the spec forbids it, and it is a normal outcome, not an
+	// error. Clamp rather than reject.
+	if !PlaybackCapable(cfg.PSKCategory, activities, unpaired) {
+		roles = []string{}
 	}
 
 	if err := writeMessage(conn, ServerActivate{
-		Activities:         cfg.InitialActivities,
+		Activities:         activities,
 		ActiveRoles:        &roles,
 		SelectedPairMethod: cfg.SelectedPairMethod,
 	}); err != nil {
 		return nil, fmt.Errorf("send server/activate: %w", err)
 	}
 
-	return &ServerSession{Conn: conn, Hello: *hello, ActiveRoles: roles, cfg: cfg}, nil
+	sess := &ServerSession{Conn: conn, Hello: *hello, ActiveRoles: roles, cfg: cfg}
+	sess.Activities = activities
+	return sess, nil
 }
 
 // Reactivate re-sends server/activate with a new activity set and,
