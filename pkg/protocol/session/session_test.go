@@ -78,11 +78,11 @@ func TestParse_RegistryAndUnknown(t *testing.T) {
 	}
 
 	// Unknown message types surface as UnknownMessage, not errors.
-	msg, err = Parse([]byte(`{"type":"stream/start","payload":{"player":{"codec":"opus"}}}`))
+	msg, err = Parse([]byte(`{"type":"x/unknown","payload":{"foo":"bar"}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u, ok := msg.(UnknownMessage); !ok || u.Type != "stream/start" {
+	if u, ok := msg.(UnknownMessage); !ok || u.Type != "x/unknown" {
 		t.Errorf("Parse(unknown) = %#v", msg)
 	}
 
