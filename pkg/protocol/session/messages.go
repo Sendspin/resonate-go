@@ -215,6 +215,10 @@ func typeOf(v any) (string, error) {
 		return "stream/start", nil
 	case StreamEnd, *StreamEnd:
 		return "stream/end", nil
+	case ClientCommand, *ClientCommand:
+		return "client/command", nil
+	case ServerCommand, *ServerCommand:
+		return "server/command", nil
 	case ClientPairInit, *ClientPairInit:
 		return "client/pair-init", nil
 	case ServerPairInit, *ServerPairInit:
@@ -280,6 +284,10 @@ func Parse(raw []byte) (any, error) {
 		v = &StreamStart{}
 	case "stream/end":
 		v = &StreamEnd{}
+	case "client/command":
+		v = &ClientCommand{}
+	case "server/command":
+		v = &ServerCommand{}
 	case "client/pair-init":
 		v = &ClientPairInit{}
 	case "server/pair-init":

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"sync"
 
 	"github.com/Sendspin/sendspin-go/pkg/protocol/playback"
@@ -21,6 +22,8 @@ type member struct {
 	timing    playback.Timing
 	byteRate  int
 	available bool
+	volume    int // 0-100; the player's own volume, seeded to 100
+	muted     bool
 
 	groupID     string
 	prevGroupID string
@@ -109,7 +112,7 @@ func flush(sends []pendingSend) error {
 func (m *GroupManager) Join(clientID string, conn *secure.Conn, t playback.Timing, byteRate int) (string, error) {
 	m.mu.Lock()
 	gid := m.newSoloGroup(clientID, conn, t, byteRate)
-	m.members[clientID] = &member{conn: conn, timing: t, byteRate: byteRate, groupID: gid}
+	m.members[clientID] = &member{conn: conn, timing: t, byteRate: byteRate, groupID: gid, volume: 100}
 	sends := []pendingSend{{conn, m.groupUpdate(gid)}}
 	m.mu.Unlock()
 	return gid, flush(sends)
@@ -144,6 +147,12 @@ func (m *GroupManager) ApplyClientState(clientID string, st ClientState) error {
 				BufferCapacity:     st.Player.BufferCapacity,
 			})
 			m.groups[mi.groupID].SetTiming(clientID, mi.timing)
+			if st.Player.Volume != nil {
+				mi.volume = clampVolume(*st.Player.Volume)
+			}
+			if st.Player.Mute != nil {
+				mi.muted = *st.Player.Mute
+			}
 		}
 		m.mu.Unlock()
 	}
@@ -278,6 +287,120 @@ func (m *GroupManager) GroupByID(groupID string) *playback.Group {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.groups[groupID]
+}
+
+// GroupVolume is the group's volume: the rounded average of its members'
+// volumes, or 100 for an empty group.
+func (m *GroupManager) GroupVolume(groupID string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := m.memberIDs(groupID)
+	if len(ids) == 0 {
+		return 100
+	}
+	total := 0
+	for _, id := range ids {
+		total += m.members[id].volume
+	}
+	return int(math.Round(float64(total) / float64(len(ids))))
+}
+
+// GroupMuted reports the group's mute state: true only when every member is
+// muted (an empty group is unmuted).
+func (m *GroupManager) GroupMuted(groupID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := m.memberIDs(groupID)
+	if len(ids) == 0 {
+		return false
+	}
+	for _, id := range ids {
+		if !m.members[id].muted {
+			return false
+		}
+	}
+	return true
+}
+
+// SetGroupVolume sets the group's volume to level (clamped to 0-100) by the
+// spec's redistribution algorithm: shift every member by the delta from the
+// current average, clamp each to [0,100], and redistribute the amount lost to
+// clamping across the members that still have headroom, up to five rounds. Each
+// member whose volume changes is sent a server/command volume directive.
+func (m *GroupManager) SetGroupVolume(groupID string, level int) error {
+	m.mu.Lock()
+	level = clampVolume(level)
+	ids := m.memberIDs(groupID)
+	if len(ids) == 0 {
+		m.mu.Unlock()
+		return nil
+	}
+
+	vols := make(map[string]float64, len(ids))
+	var total float64
+	for _, id := range ids {
+		vols[id] = float64(m.members[id].volume)
+		total += vols[id]
+	}
+	delta := float64(level) - total/float64(len(ids))
+
+	active := append([]string(nil), ids...)
+	for round := 0; round < 5; round++ {
+		lost := 0.0
+		var next []string
+		for _, id := range active {
+			proposed := vols[id] + delta
+			switch {
+			case proposed > 100:
+				lost += proposed - 100
+				vols[id] = 100
+			case proposed < 0:
+				lost += proposed // proposed - 0
+				vols[id] = 0
+			default:
+				vols[id] = proposed
+				next = append(next, id)
+			}
+		}
+		if len(next) == 0 || math.Abs(lost) < 0.01 {
+			break
+		}
+		delta = lost / float64(len(next))
+		active = next
+	}
+
+	var sends []pendingSend
+	for _, id := range ids {
+		nv := int(math.Round(vols[id]))
+		if nv == m.members[id].volume {
+			continue
+		}
+		m.members[id].volume = nv
+		v := nv
+		sends = append(sends, pendingSend{m.members[id].conn,
+			ServerCommand{Player: &PlayerCommand{Command: PlayerCmdVolume, Volume: &v}}})
+	}
+	m.mu.Unlock()
+	return flush(sends)
+}
+
+// SetGroupMute sets every member's mute state to muted and sends each a
+// server/command mute directive. A member already in the target state is left
+// untouched.
+func (m *GroupManager) SetGroupMute(groupID string, muted bool) error {
+	m.mu.Lock()
+	var sends []pendingSend
+	for _, id := range m.memberIDs(groupID) {
+		if m.members[id].muted == muted {
+			continue
+		}
+		m.members[id].muted = muted
+		mu := muted
+		sends = append(sends, pendingSend{m.members[id].conn,
+			ServerCommand{Player: &PlayerCommand{Command: PlayerCmdMute, Mute: &mu}}})
+	}
+	m.mu.Unlock()
+	return flush(sends)
 }
 
 // GroupID returns the client's current group_id, or "" if unknown.
@@ -436,6 +559,16 @@ func (m *GroupManager) memberIDs(groupID string) []string {
 		}
 	}
 	return ids
+}
+
+func clampVolume(v int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > 100 {
+		return 100
+	}
+	return v
 }
 
 func randomGroupID() string {
