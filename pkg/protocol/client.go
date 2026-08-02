@@ -408,9 +408,13 @@ func (c *Client) sendJSON(msg Message) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if !c.connected {
+	if !c.connected || c.conn == nil {
 		return fmt.Errorf("not connected")
 	}
+	if err := c.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
+		return fmt.Errorf("set write deadline: %w", err)
+	}
+	defer c.conn.SetWriteDeadline(time.Time{})
 
 	return c.conn.WriteJSON(msg)
 }
@@ -453,9 +457,23 @@ func (c *Client) handleBinaryMessage(data []byte) {
 
 	switch {
 	case msgType == AudioChunkMessageType:
+		chunk := AudioChunk{Timestamp: timestamp, Data: payload}
 		select {
-		case c.AudioChunks <- AudioChunk{Timestamp: timestamp, Data: payload}:
+		case c.AudioChunks <- chunk:
 		case <-c.ctx.Done():
+		default:
+			// Audio is real-time data. Drop the oldest queued chunk rather than
+			// blocking the WebSocket reader, which also dispatches clock-sync,
+			// heartbeat, and control messages.
+			select {
+			case <-c.AudioChunks:
+			default:
+			}
+			select {
+			case c.AudioChunks <- chunk:
+			case <-c.ctx.Done():
+			default:
+			}
 		}
 	case msgType >= ArtworkChannel0MessageType && msgType <= ArtworkChannel3MessageType:
 		select {
